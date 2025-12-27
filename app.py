@@ -40,6 +40,15 @@ def load_intervals_from_csv(file_or_path, start_col: str, end_col: str, max_hour
 
     return intervals, df_disp[["start", "end"]]
 
+def safe_speedup(rec_ms: float, iter_ms: float) -> float:
+    """
+    speedup = rec_ms / iter_ms
+    Jika iter_ms mendekati 0, kembalikan inf agar tidak error.
+    """
+    if iter_ms <= 0:
+        return float("inf")
+    return rec_ms / iter_ms
+
 # ======================================================
 # HEADER
 # ======================================================
@@ -128,9 +137,9 @@ st.info(f"Jumlah interval setelah preprocessing: **{len(sorted_intervals)}**")
 st.dataframe(df_display.head(int(limit_preview)))
 
 # ======================================================
-# SINGLE RUN (OPSIONAL) - hasil dua metode langsung
+# SINGLE RUN (FULL DATA)
 # ======================================================
-st.subheader("Deteksi Overlap (langsung dua metode)")
+st.subheader("Deteksi Overlap (Full Data) — dua metode sekaligus")
 
 run_repeat = st.number_input(
     "Repeat runtime (ambil median) untuk deteksi full-data",
@@ -146,16 +155,21 @@ if st.button("Jalankan Deteksi (Full Data)"):
     iter_ms = median_runtime_ms(count_overlaps_iterative_sorted, subset, repeat=run_repeat)
     rec_ms = median_runtime_ms(count_overlaps_recursive_divconq_sorted, subset, repeat=run_repeat)
 
+    same_overlap = (iter_overlap == rec_overlap)
+    speedup = safe_speedup(rec_ms, iter_ms)  # rec_ms / iter_ms
+
     st.table(pd.DataFrame([{
         "n": len(subset),
         "iter_overlap": iter_overlap,
         "iter_ms": round(iter_ms, 4),
         "rec_overlap": rec_overlap,
         "rec_ms": round(rec_ms, 4),
+        "same_overlap": same_overlap,
+        "speedup (rec/iter)": (round(speedup, 4) if np.isfinite(speedup) else "inf")
     }]))
 
 # ======================================================
-# BENCHMARK (n manual) - tabel langsung dua metode
+# BENCHMARK (n manual)
 # ======================================================
 st.subheader("Benchmark — Ukuran Input Manual (n)")
 
@@ -205,20 +219,37 @@ if st.button("Jalankan Benchmark"):
                 idx = rng.choice(len(sorted_intervals), size=n, replace=False)
                 subset = sort_intervals(sorted_intervals[idx])
 
-            # hitung overlap (cek konsistensi hasil)
             iter_overlap = count_overlaps_iterative_sorted(subset)
             rec_overlap = count_overlaps_recursive_divconq_sorted(subset)
 
-            # runtime median (ms)
             iter_ms = median_runtime_ms(count_overlaps_iterative_sorted, subset, repeat=repeat_bench)
             rec_ms = median_runtime_ms(count_overlaps_recursive_divconq_sorted, subset, repeat=repeat_bench)
 
-            rows.append((n, iter_overlap, iter_ms, rec_overlap, rec_ms))
+            same_overlap = (iter_overlap == rec_overlap)
+            speedup = safe_speedup(rec_ms, iter_ms)
+
+            rows.append((
+                n,
+                iter_overlap, iter_ms,
+                rec_overlap, rec_ms,
+                same_overlap, speedup
+            ))
 
         df_result = pd.DataFrame(
             rows,
-            columns=["n", "iter_overlap", "iter_ms", "rec_overlap", "rec_ms"]
+            columns=[
+                "n",
+                "iter_overlap", "iter_ms",
+                "rec_overlap", "rec_ms",
+                "same_overlap",
+                "speedup (rec/iter)"
+            ]
         )
+
+        # rapikan tampilan angka
+        df_result["iter_ms"] = df_result["iter_ms"].round(4)
+        df_result["rec_ms"] = df_result["rec_ms"].round(4)
+        df_result["speedup (rec/iter)"] = df_result["speedup (rec/iter)"].replace([np.inf], np.nan).round(4)
 
         st.dataframe(df_result)
 
@@ -232,6 +263,15 @@ if st.button("Jalankan Benchmark"):
         plt.legend(["Iteratif — O(n)", "Rekursif — O(n log n)"])
         plt.xscale("log")
         st.pyplot(fig)
+
+        # Plot speedup (opsional tapi berguna)
+        fig2 = plt.figure()
+        plt.plot(df_result["n"], df_result["speedup (rec/iter)"], marker="o")
+        plt.xlabel("Ukuran input (n)")
+        plt.ylabel("Speedup (rec_ms / iter_ms)")
+        plt.title("Rasio Kecepatan — rec_ms / iter_ms (>1 berarti iteratif lebih cepat)")
+        plt.xscale("log")
+        st.pyplot(fig2)
 
         st.success("Benchmark selesai.")
 

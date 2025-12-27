@@ -1,101 +1,61 @@
-from __future__ import annotations
+import argparse
+import pandas as pd
 import numpy as np
-import time
 
-def sort_intervals(intervals: np.ndarray) -> np.ndarray:
-    """
-    intervals: np.ndarray shape (n,2) => [start_ns, end_ns]
-    return: sorted by start then end (ascending)
-    """
-    if len(intervals) == 0:
-        return intervals
-    return intervals[np.lexsort((intervals[:, 1], intervals[:, 0]))]
+from algorithms import (
+    sort_intervals,
+    count_overlaps_iterative_sorted,
+    count_overlaps_recursive_divconq_sorted,
+    median_runtime_ms
+)
 
-def count_overlaps_iterative(intervals: np.ndarray) -> int:
-    """
-    Overlap definition (stable for benchmarking):
-      interval i dianggap overlap jika start_i < current_max_end
-      saat menyapu interval yang sudah diurutkan berdasarkan start time.
+def load_intervals(csv_path: str, start_col: str, end_col: str, max_hours: float = 24.0):
+    df = pd.read_csv(csv_path, usecols=[start_col, end_col], low_memory=False)
+    df[start_col] = pd.to_datetime(df[start_col], errors="coerce")
+    df[end_col] = pd.to_datetime(df[end_col], errors="coerce")
+    df = df.dropna(subset=[start_col, end_col])
+    df = df[df[start_col] < df[end_col]]
 
-    Output:
-      jumlah interval yang terdeteksi overlap (bukan jumlah pasangan overlap).
-    Complexity:
-      - Sorting: O(n log n)
-      - Sweep:   O(n)
-      Total: O(n log n), tapi inti overlap detection sweep = O(n).
-    """
-    if len(intervals) == 0:
-        return 0
+    dur_s = (df[end_col] - df[start_col]).dt.total_seconds()
+    df = df[dur_s <= max_hours * 3600]
 
-    iv = sort_intervals(intervals)
-    overlaps = 0
-    current_end = iv[0, 1]
+    start_ns = df[start_col].values.astype("datetime64[ns]").astype("int64")
+    end_ns = df[end_col].values.astype("datetime64[ns]").astype("int64")
+    intervals = np.column_stack([start_ns, end_ns])
+    return sort_intervals(intervals)
 
-    for i in range(1, len(iv)):
-        s, e = iv[i]
-        if s < current_end:
-            overlaps += 1
-            if e > current_end:
-                current_end = e
-        else:
-            current_end = e
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--csv", required=True, help="Path ke CSV data")
+    ap.add_argument("--start_col", default="lpep_pickup_datetime")
+    ap.add_argument("--end_col", default="lpep_dropoff_datetime")
+    ap.add_argument("--sizes", default="10000,20000,40000,80000,160000")
+    ap.add_argument("--repeat", type=int, default=3)
+    ap.add_argument("--max_hours", type=float, default=24.0)
+    args = ap.parse_args()
 
-    return overlaps
+    sorted_all = load_intervals(args.csv, args.start_col, args.end_col, max_hours=args.max_hours)
+    print("Total intervals after clean:", len(sorted_all))
 
-def count_overlaps_recursive_divconq(intervals: np.ndarray) -> int:
-    """
-    Divide & Conquer overlap detection.
-    Kita tetap sort dulu agar interval kanan punya start >= interval kiri (secara global).
+    sizes = [int(x.strip()) for x in args.sizes.split(",") if x.strip().isdigit()]
+    sizes = sorted(set([n for n in sizes if 0 < n <= len(sorted_all)]))
 
-    Intuisi:
-      - hitung overlap di kiri
-      - hitung overlap di kanan
-      - hitung overlap silang dengan scanning bagian kanan menggunakan max_end dari kiri
+    rng = np.random.default_rng(42)
 
-    Complexity (setelah sorting):
-      T(n) = 2T(n/2) + O(n) => O(n log n)
+    print("\nBenchmark Results (deteksi overlap tanpa sorting)")
+    print("n, iter_ms, rec_ms, iter_overlap, rec_overlap")
 
-    Output:
-      jumlah interval yang terdeteksi overlap (definisi sama seperti iteratif).
-    """
-    if len(intervals) == 0:
-        return 0
+    for n in sizes:
+        idx = rng.choice(len(sorted_all), size=n, replace=False)
+        subset = sort_intervals(sorted_all[idx])  # subset harus terurut
 
-    iv = sort_intervals(intervals)
+        iter_overlap = count_overlaps_iterative_sorted(subset)
+        rec_overlap = count_overlaps_recursive_divconq_sorted(subset)
 
-    def solve(lo: int, hi: int):
-        n = hi - lo
-        if n <= 1:
-            if n == 1:
-                return 0, iv[lo, 1]  # (count, max_end)
-            return 0, -np.inf
+        iter_ms = median_runtime_ms(count_overlaps_iterative_sorted, subset, repeat=args.repeat)
+        rec_ms = median_runtime_ms(count_overlaps_recursive_divconq_sorted, subset, repeat=args.repeat)
 
-        mid = lo + n // 2
-        left_count, left_maxend = solve(lo, mid)
-        right_count, right_maxend = solve(mid, hi)
+        print(f"{n}, {iter_ms:.4f}, {rec_ms:.4f}, {iter_overlap}, {rec_overlap}")
 
-        cross = 0
-        max_end_so_far = left_maxend
-        for i in range(mid, hi):
-            s, e = iv[i]
-            if s < max_end_so_far:
-                cross += 1
-            if e > max_end_so_far:
-                max_end_so_far = e
-
-        return left_count + right_count + cross, max(max_end_so_far, right_maxend)
-
-    total, _ = solve(0, len(iv))
-    return total
-
-def median_runtime_ms(fn, intervals: np.ndarray, repeat: int = 5) -> float:
-    """
-    Mengukur runtime median (ms) untuk stabilitas.
-    """
-    times = []
-    for _ in range(repeat):
-        t0 = time.perf_counter()
-        _ = fn(intervals)
-        t1 = time.perf_counter()
-        times.append((t1 - t0) * 1000.0)
-    return float(np.median(times))
+if __name__ == "__main__":
+    main()
